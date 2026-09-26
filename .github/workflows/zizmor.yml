@@ -56,6 +56,17 @@ jobs:
   zizmor:
     name: zizmor
     runs-on: ubuntu-latest
+
+    # One run per pull request at a time, newest wins. Two runs that overlap
+    # both read the pull request before either has posted, so both conclude
+    # nothing has been reported yet and both post — the dedup cannot see a
+    # review that does not exist yet. Observed on devtest-hq/devtest-infra#39:
+    # a reopen and a push landed together and produced two identical reviews
+    # with the same submitted_at to the second.
+    concurrency:
+      group: zizmor-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+
     permissions:
       contents: read
       pull-requests: write
