@@ -1,0 +1,6 @@
+{
+  "name": "zizmor — Actions security review",
+  "description": "Audit this repo's GitHub Actions workflows on every pull request and post findings as review comments.",
+  "iconName": "octicon shield-check",
+  "categories": ["Security", "Continuous integration"]
+}
