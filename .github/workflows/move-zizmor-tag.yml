@@ -1,0 +1,55 @@
+# =============================================================================
+# move-zizmor-tag.yml — keep zizmor-v1 pointing at the tip of develop
+#
+# Every repo in the org calls the zizmor workflow at @zizmor-v1, so merging a
+# change here does nothing until the tag moves. That has already bitten once:
+# a fix was merged, reported green, and changed nothing anywhere, because the
+# tag still pointed at the previous commit. Nothing warns you — the callers
+# keep resolving the old code and keep passing.
+#
+# So the tag is not a release marker to be moved by hand. It means "the tip of
+# develop", and this keeps that true.
+#
+# Pushing a tag does not fire a `push: branches:` event, so this cannot loop.
+# =============================================================================
+
+name: Move the zizmor-v1 tag
+
+on:
+  push:
+    branches: [develop]
+
+permissions: {}
+
+concurrency:
+  group: move-zizmor-tag
+  cancel-in-progress: true
+
+jobs:
+  retag:
+    name: Move zizmor-v1 to the tip of develop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No checkout on purpose: moving a ref is one API call, and a checkout
+      # able to push a tag would have to keep its credentials on disk, which
+      # is an artipacked finding in the very repo that reports them.
+      - name: Point zizmor-v1 at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REPO}/git/ref/tags/zizmor-v1" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${REPO}/git/refs/tags/zizmor-v1" \
+              -f sha="${SHA}" -F force=true --jq '.object.sha'
+            echo "moved zizmor-v1 to ${SHA}"
+          else
+            # First run, or someone deleted the tag. Create rather than fail:
+            # a missing tag breaks every caller in the org.
+            gh api -X POST "repos/${REPO}/git/refs" \
+              -f ref="refs/tags/zizmor-v1" -f sha="${SHA}" --jq '.object.sha'
+            echo "created zizmor-v1 at ${SHA}"
+          fi
