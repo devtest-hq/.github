@@ -172,8 +172,13 @@ def build_body(out_of_diff, total, suppressed):
         for f in out_of_diff:
             icon = SEV_ICON.get(f["severity"], "⚪")
             rule = f"[`{f['ident']}`]({f['url']})" if f["url"] else f"`{f['ident']}`"
+            # The marker is what stops this row being re-posted on the next
+            # push. Inline comments carry one already; without it here, the
+            # out-of-diff table was rebuilt verbatim on every push, because
+            # already_commented() had nothing to match these findings against.
             lines.append(
-                f"| {icon} {f['severity']} | {rule} | `{f['path']}:{f['line']}` |"
+                f"| {icon} {f['severity']} | {rule} | "
+                f"`{f['path']}:{f['line']}` {marker_for(f)} |"
             )
         lines.append("")
     if suppressed:
