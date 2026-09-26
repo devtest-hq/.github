@@ -163,9 +163,16 @@ smaller audit with no warning that it was smaller.
 ## Maintaining this workflow
 
 The implementation is `.github/workflows/zizmor.yml` plus
-`.github/scripts/zizmor_review.py` in this repo. Callers resolve the
-**`zizmor-v1` tag**, so a merge to `develop` changes nothing on its own —
-move the tag too, or the fix you just merged is not live:
+`.github/scripts/zizmor_review.py` in this repo.
+
+Callers resolve the **`zizmor-v1` tag**, which means the tip of `develop`.
+`.github/workflows/move-zizmor-tag.yml` moves it on every push to `develop`,
+so merging is all you need to do.
+
+That is automated because the manual version failed in the obvious way: a fix
+was merged, reported green, and changed nothing anywhere, because the tag
+still pointed at the previous commit and every caller kept resolving the old
+code. Nothing warns you. If the tag ever needs moving by hand:
 
 ```bash
 git tag -f zizmor-v1 origin/develop && git push -f origin refs/tags/zizmor-v1
