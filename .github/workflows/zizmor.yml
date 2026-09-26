@@ -131,7 +131,30 @@ jobs:
           # 1/2/3 by hand, and the obvious `|| true` makes a crashed scanner
           # indistinguishable from a clean repo. Whether findings fail the job
           # is decided by fail-on-findings, below, from the JSON.
+          set +e
           zizmor "${args[@]}" --no-exit-codes . > "${RUNNER_TEMP}/findings.json"
+          rc=$?
+          set -e
+
+          case "${rc}" in
+            0)
+              ;;
+            3)
+              # "no inputs collected" — this repository has no workflows,
+              # composite actions or Dependabot config yet. That is not a
+              # failure, and --no-exit-codes does NOT cover this code: zizmor
+              # still exits 3 and writes nothing at all, so findings.json is
+              # empty and the jq below would die on it. Repos adopt the check
+              # before they have any CI, so this is the normal state for them,
+              # not an edge case.
+              echo "no auditable files in this repository; nothing to do"
+              echo '[]' > "${RUNNER_TEMP}/findings.json"
+              ;;
+            *)
+              echo "::error::zizmor failed with exit code ${rc}"
+              exit "${rc}"
+              ;;
+          esac
 
           count=$(jq 'length' "${RUNNER_TEMP}/findings.json")
           echo "count=${count}" >> "$GITHUB_OUTPUT"
