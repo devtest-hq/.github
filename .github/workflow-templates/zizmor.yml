@@ -1,0 +1,23 @@
+# Runs zizmor against this repository's GitHub Actions workflows on every pull
+# request and posts the findings as review comments on the diff.
+#
+# The implementation lives in devtest-hq/.github; this is only the caller.
+# See https://github.com/devtest-hq/.github#zizmor
+
+name: zizmor
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  zizmor:
+    # A called workflow can never hold more permission than its caller grants,
+    # so pull-requests: write has to be named here even though the reusable
+    # workflow also declares it.
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: devtest-hq/.github/.github/workflows/zizmor.yml@zizmor-v1

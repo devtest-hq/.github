@@ -1,0 +1,180 @@
+# =============================================================================
+# zizmor.yml — org-wide GitHub Actions security review on pull requests
+#
+# Reusable workflow. Each repo calls it with a ~15-line caller; copy
+# .github/workflow-templates/zizmor.yml. See README.md in this repo.
+#
+# zizmor (https://docs.zizmor.sh/) is a static analyser for GitHub Actions:
+# template injection, over-scoped GITHUB_TOKEN, unpinned actions, credentials
+# left on disk by actions/checkout.
+#
+# WHY WE BUILD THE REVIEW OURSELVES instead of uploading SARIF to code
+# scanning, which is what zizmor's own docs recommend: code scanning needs
+# GitHub Code Security, which this org's Team plan does not include (~$180/mo
+# at 6 active committers). Same reason devtest-infra's secret-scan.yml runs the
+# gitleaks CLI rather than using GitHub secret scanning. Code scanning would
+# not give us review comments anyway — it produces check annotations and
+# Security-tab alerts, not comments on the diff.
+#
+# WHY THE CLI RATHER THAN zizmorcore/zizmor-action: the action either uploads
+# SARIF (needs Code Security) or prints to a log. Neither hands us the findings
+# as data, and we need them as JSON to build the review.
+# =============================================================================
+
+name: zizmor
+
+on:
+  workflow_call:
+    inputs:
+      request-changes:
+        description: >-
+          Post the review as REQUEST_CHANGES rather than COMMENT. A standing
+          request for changes gates the merge button wherever branch protection
+          requires an approving review. Leave false while a repo still carries
+          a baseline of pre-existing findings.
+        type: boolean
+        default: false
+      fail-on-findings:
+        description: >-
+          Fail the job when zizmor reports anything. Leave false during rollout
+          so the check stays advisory. A zizmor *crash* fails the job either
+          way — that is not controlled by this input.
+        type: boolean
+        default: false
+      min-severity:
+        description: "informational | low | medium | high. Empty reports everything."
+        type: string
+        default: ""
+      persona:
+        description: "regular | pedantic | auditor"
+        type: string
+        default: regular
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Check out the repository under review
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # zizmor's artipacked audit flags a checkout that leaves credentials
+          # on disk. A scanner that trips its own rule is not a good
+          # advertisement, so this workflow passes its own audit.
+          persist-credentials: false
+
+      - name: Install zizmor
+        env:
+          # Pinned deliberately. An unpinned "latest" would mean the tool
+          # gating our pull requests changes under us without review — the same
+          # reasoning as GITLEAKS_VERSION in devtest-infra's secret-scan.yml and
+          # the image digests in its compose.yml.
+          ZIZMOR_VERSION: 1.30.1
+          # sha256 of zizmor-1.30.1-py3-none-manylinux_2_28_x86_64.whl, which is
+          # what ubuntu-latest resolves to. Verify before executing: this binary
+          # runs in a job that can read the repo and comment on pull requests.
+          #
+          # Installed from PyPI rather than the GitHub release page because the
+          # release tarballs ship no checksums file — --require-hashes is the
+          # only verification upstream offers.
+          ZIZMOR_SHA256: eee12266b793cb87ad4a7e3af2e72404f8a63e3de5eb099b80bf7b1cfd232a8e
+        run: |
+          set -euo pipefail
+          printf 'zizmor==%s \\\n  --hash=sha256:%s\n' \
+            "${ZIZMOR_VERSION}" "${ZIZMOR_SHA256}" > "${RUNNER_TEMP}/zizmor.txt"
+          # A venv rather than a bare `pip install`: recent Debian/Ubuntu
+          # pythons are PEP 668 "externally managed" and refuse to install into
+          # the system interpreter. Not worth depending on which side of that
+          # change the runner image happens to be on.
+          python3 -m venv "${RUNNER_TEMP}/venv"
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet \
+            --require-hashes -r "${RUNNER_TEMP}/zizmor.txt"
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run zizmor
+        id: zizmor
+        env:
+          # Merely having a token is what puts zizmor in online mode, which
+          # enables the known-vulnerable-actions, impostor-commit and
+          # typosquat-uses audits. Without it those three silently do nothing —
+          # there is no warning that you are running a smaller audit.
+          GH_TOKEN: ${{ github.token }}
+          MIN_SEVERITY: ${{ inputs.min-severity }}
+          PERSONA: ${{ inputs.persona }}
+        run: |
+          set -euo pipefail
+          args=(--format=json-v1 --persona="${PERSONA}")
+          if [ -n "${MIN_SEVERITY}" ]; then
+            args+=(--min-severity="${MIN_SEVERITY}")
+          fi
+
+          # --no-exit-codes collapses zizmor's "I found something" exit codes
+          # (11-14, one per severity) to 0, leaving non-zero to mean the tool
+          # itself failed. Without it we would have to tell 11-14 apart from
+          # 1/2/3 by hand, and the obvious `|| true` makes a crashed scanner
+          # indistinguishable from a clean repo. Whether findings fail the job
+          # is decided by fail-on-findings, below, from the JSON.
+          zizmor "${args[@]}" --no-exit-codes . > "${RUNNER_TEMP}/findings.json"
+
+          count=$(jq 'length' "${RUNNER_TEMP}/findings.json")
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "zizmor reported ${count} finding(s)"
+
+      # MUST come after "Run zizmor". This checks out a second repository into
+      # the workspace, and that repository contains workflow files of its own —
+      # zizmor collects recursively, so scanning with the tooling already in
+      # place would report this repo's workflows as findings in the repo under
+      # review.
+      - name: Check out the review tooling
+        if: steps.zizmor.outputs.count != '0'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: devtest-hq/.github
+          # The commit of *this reusable workflow*, whatever ref the caller
+          # used. Keeps the script and the workflow that runs it in lockstep,
+          # and means a branch of this repo can be tested end to end without
+          # moving the zizmor-v1 tag.
+          ref: ${{ github.job_workflow_sha }}
+          path: .zizmor-tooling
+          persist-credentials: false
+
+      # Capped at 10 per step by GitHub, so not the primary surface. These are
+      # here because they still work on pull requests from forks, where the
+      # review below cannot be posted at all.
+      - name: Annotate
+        if: steps.zizmor.outputs.count != '0'
+        run: python3 .zizmor-tooling/.github/scripts/zizmor_review.py annotate "${RUNNER_TEMP}/findings.json"
+
+      - name: Post review
+        if: steps.zizmor.outputs.count != '0'
+        # A pull request from a fork gets a read-only GITHUB_TOKEN no matter
+        # what the permissions block says, so this 403s there. Three repos in
+        # the org are forks. The annotations above are the fallback.
+        #
+        # Do NOT "fix" that by moving the caller to pull_request_target: it is
+        # a Critical dangerous-triggers finding, and zizmor would flag the very
+        # workflow that reports zizmor findings.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_EVENT: ${{ inputs.request-changes && 'REQUEST_CHANGES' || 'COMMENT' }}
+        run: python3 .zizmor-tooling/.github/scripts/zizmor_review.py review "${RUNNER_TEMP}/findings.json"
+
+      - name: Fail on findings
+        if: inputs.fail-on-findings && steps.zizmor.outputs.count != '0'
+        env:
+          # Via env rather than interpolated straight into the run body: that
+          # is zizmor's own template-injection remediation, and this workflow
+          # holds itself to the rules it enforces.
+          COUNT: ${{ steps.zizmor.outputs.count }}
+        run: |
+          echo "::error::zizmor reported ${COUNT} finding(s)"
+          exit 1
