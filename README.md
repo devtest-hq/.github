@@ -86,9 +86,57 @@ this org's Team plan does not include (~$180/month at 6 active committers), and
 it would not produce review comments anyway — it produces check annotations and
 Security-tab alerts.
 
-### Suppressing a finding
+## For engineers: what zizmor will do on your pull requests
 
-Per repo, in that repo's `.github/zizmor.yml`, with the reason written down:
+**What it is.** A static analyser for GitHub Actions. It reads your
+`.github/workflows/*.yml` files and reports security problems in the CI itself.
+
+**It does not read your application code.** zizmor only collects four kinds of
+file: workflows, composite action definitions (`action.yml`), `dependabot.yml`
+and pre-commit configs. Point it at a repo of pure JavaScript or Python and it
+exits with "no inputs collected" — your source is never parsed. If you want
+analysis of application code, that is a different tool and a separate decision.
+
+**When it runs.** On every pull request, as a check named `zizmor / zizmor`.
+Findings arrive as review comments on the diff, in the same place a human
+reviewer's comments appear.
+
+**It is advisory.** It cannot block a merge and cannot fail your build. That is
+deliberate: the org has a backlog of pre-existing findings, and turning this on
+as a gate would have blocked every open pull request on day one. It will become
+blocking once repos are cleaned up, and you will be told before that happens.
+
+### What it looks for
+
+Roughly in the order you will meet them:
+
+| Audit | Meaning | Fix |
+| --- | --- | --- |
+| `unpinned-uses` | An action referenced by tag rather than commit hash, e.g. `docker/build-push-action@v6`. A tag can be repointed at different code by its owner; a hash cannot. | `uses: owner/action@<40-char-sha> # v6` |
+| `excessive-permissions` | No `permissions:` block, so the job gets the default token scope. | `permissions: {}` at the top, then grant each job only what it needs. |
+| `artipacked` | `actions/checkout` leaves a credential in `.git/config` that later steps and uploaded artifacts can read. | `persist-credentials: false` |
+| `template-injection` | The serious one. A `${{ ... }}` expanded straight into a `run:` body *becomes shell code*, so an attacker-controllable value — a pull request title, a branch name — can execute commands. | Pass it through `env:` and reference `"$VAR"` in the script. |
+| `adhoc-packages` | Installing unpinned packages mid-workflow. | Pin the version. |
+| `cache-poisoning` | Restoring a cache in a job that publishes artifacts. | Disable cache restore in release jobs. |
+
+The full catalogue is at <https://docs.zizmor.sh/audits/>.
+
+### Two things that will surprise you
+
+1. **Findings appear for files your pull request did not touch.** zizmor audits
+   the whole repository, so pre-existing problems are reported in the review
+   *body* rather than as inline comments. Those are not yours to fix unless you
+   want to — the inline comments on your own diff are the ones that concern your
+   change.
+
+2. **A repo needs `.github/zizmor.yml` as well as the workflow.** It carries the
+   pinning policy: our own `devtest-hq/*` reusable workflows may use tags,
+   everything else needs a hash. Without it, the check reports itself.
+
+### If a finding is wrong
+
+Add it to that repo's `.github/zizmor.yml` under `rules.<audit>.ignore`, with a
+comment saying why:
 
 ```yaml
 rules:
@@ -98,16 +146,27 @@ rules:
       - release.yml:42
 ```
 
-Prefer `ignore` over `disable: true` — `disable` turns the audit off for the
-whole repository, including code nobody has looked at yet.
+Do not reach for `disable: true` — that switches the audit off for the whole
+repository, including code nobody has looked at yet.
 
-### Local use
+### Running it before you push
 
 ```bash
 pipx install zizmor==1.30.1     # or: uv tool install zizmor==1.30.1
 GH_TOKEN=$(gh auth token) zizmor .
 ```
 
-A token is what puts zizmor in online mode; without one the
-`known-vulnerable-actions`, `impostor-commit` and `typosquat-uses` audits
-silently do nothing.
+The token matters. Without one, three audits — `known-vulnerable-actions`,
+`impostor-commit` and `typosquat-uses` — silently do nothing, and you get a
+smaller audit with no warning that it was smaller.
+
+## Maintaining this workflow
+
+The implementation is `.github/workflows/zizmor.yml` plus
+`.github/scripts/zizmor_review.py` in this repo. Callers resolve the
+**`zizmor-v1` tag**, so a merge to `develop` changes nothing on its own —
+move the tag too, or the fix you just merged is not live:
+
+```bash
+git tag -f zizmor-v1 origin/develop && git push -f origin refs/tags/zizmor-v1
+```
