@@ -1,0 +1,148 @@
+# =============================================================================
+# security-code.yml — code security scan on pull requests (semgrep + trivy)
+#
+# Reusable workflow. Each repo calls it from a short caller; copy
+# .github/workflow-templates/security.yml. See README.md in this repo.
+#
+# semgrep CE (p/default rules) reads the code for bug patterns; trivy reads
+# the dependency manifests (known vulnerabilities with a fix), looks for
+# committed secrets, and checks Dockerfiles and IaC. Both run on the pull
+# request AND on its base, and only what the pull request adds is reported,
+# as one comment that is updated on every push, plus the job summary.
+#
+# Same tools, versions and rules as the weekly scan on sec01
+# (devtest-hq/devtest-security, testing/agents/scanners.py), which scans every
+# repo's staging, develop and main/master every Sunday and opens Jira issues.
+#
+# WHY CONTAINERS PINNED BY DIGEST rather than the marketplace actions: the
+# digest is the same one sec01 runs, so a result here and a result there mean
+# the same thing, and an upstream change arrives as a reviewed diff here.
+#
+# WHY NOT SARIF / code scanning: it needs GitHub Code Security, which the Team
+# plan does not include (see the zizmor section of README.md).
+# =============================================================================
+
+name: security-code
+
+on:
+  workflow_call:
+    inputs:
+      fail-on-findings:
+        description: >-
+          Fail the job when the pull request adds a finding at fail-severity or
+          above. Leave false during rollout so the check stays advisory. A
+          scanner that produces no output fails the job either way.
+        type: boolean
+        default: false
+      fail-severity:
+        description: "CRITICAL | HIGH | MEDIUM | LOW"
+        type: string
+        default: HIGH
+
+permissions: {}
+
+env:
+  # Same digests as devtest-security/testing/agents/scanners.py. Change both.
+  TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+  SEMGREP_IMAGE: semgrep/semgrep:1.178.0-nonroot@sha256:2124de200043ce3ded427d02e924ff3b59d017020614d28c2bb7ce6656bec5d4
+
+jobs:
+  scan:
+    name: semgrep + trivy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # One run per pull request at a time, newest wins (two overlapping runs
+    # would both find no comment yet and both post one).
+    concurrency:
+      group: security-code-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: head
+          persist-credentials: false
+
+      - name: Check out the base branch
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      # The tooling is checked out last and outside the scanned folders, so its
+      # own files are never scanned as the repo's.
+      - name: Check out the report tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: devtest-hq/.github
+          ref: ${{ github.job_workflow_sha }}
+          path: .security-tooling
+          persist-credentials: false
+
+      - name: Scan
+        id: scan
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/scan"
+          mkdir -p "${out}"
+          docker volume create trivy-cache >/dev/null
+          for side in head base; do
+            [ -d "${side}" ] || continue
+            # semgrep exits 1 when it finds something; no output = failure.
+            docker run --rm --security-opt no-new-privileges \
+              -v "${PWD}/${side}:/src:ro" "${SEMGREP_IMAGE}" \
+              semgrep scan --config p/default --metrics=off \
+              --disable-version-check --json --quiet /src \
+              > "${out}/semgrep-${side}.json" || true
+            docker run --rm --security-opt no-new-privileges \
+              -v trivy-cache:/root/.cache/trivy \
+              -v "${PWD}/${side}:/src:ro" "${TRIVY_IMAGE}" fs --quiet \
+              --scanners vuln,secret,misconfig \
+              --severity MEDIUM,HIGH,CRITICAL --ignore-unfixed \
+              --format json /src \
+              > "${out}/trivy-${side}.json" || true
+          done
+          args=(code --head-semgrep "${out}/semgrep-head.json"
+                --head-trivy "${out}/trivy-head.json"
+                --fail-severity "${FAIL_SEVERITY}")
+          if [ -d base ]; then
+            args+=(--base-semgrep "${out}/semgrep-base.json"
+                   --base-trivy "${out}/trivy-base.json")
+          fi
+          python3 .security-tooling/.github/scripts/security_report.py "${args[@]}"
+        env:
+          FAIL_SEVERITY: ${{ inputs.fail-severity }}
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        # Read-only token on pull requests from forks: this 403s there and the
+        # job summary is the fallback.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          body="${RUNNER_TEMP}/security-comment.md"
+          if [ -f "${body}" ]; then
+            python3 .security-tooling/.github/scripts/security_report.py comment "${body}"
+          else
+            echo "no report to post (the scan step failed; see its log)"
+          fi
+
+      - name: Fail on new findings
+        if: inputs.fail-on-findings && steps.scan.outputs.new_blocking != '0' && steps.scan.outputs.new_blocking != ''
+        env:
+          COUNT: ${{ steps.scan.outputs.new_blocking }}
+          FAIL_SEVERITY: ${{ inputs.fail-severity }}
+        run: |
+          echo "::error::this pull request adds ${COUNT} finding(s) at ${FAIL_SEVERITY} or above"
+          exit 1

@@ -1,0 +1,38 @@
+# Security scans (devtest-hq/.github, see its README "Security scans").
+# Pull requests to develop/main: semgrep + trivy, only what the PR adds,
+# as one comment. Weekly: trivy on the :staging images (delete the images
+# job if this repo publishes none). After each image build: add the
+# security-image job to the image workflow (README).
+name: security
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "0 2 * * 1"     # Monday 02:00 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  code:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: devtest-hq/.github/.github/workflows/security-code.yml@security-v1
+
+  images:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ghcr.io/devtest-hq/IMAGE-NAME:staging
+    permissions:
+      contents: read
+      packages: read
+    uses: devtest-hq/.github/.github/workflows/security-image.yml@security-v1
+    with:
+      image: ${{ matrix.image }}
