@@ -1,0 +1,85 @@
+# =============================================================================
+# security-image.yml — trivy scan of a container image the repo publishes
+#
+# Reusable workflow. Called by the repo's image workflow right after it pushes
+# (a job with needs: on the build job), and weekly by the repo's security.yml
+# for the :staging tag, so a vulnerability published after the build is found
+# too. Vulnerabilities with a fixed version only, MEDIUM and up: each one is
+# fixed by upgrading the base image or the package.
+#
+# trivy reads the image's layers from GHCR itself with this run's token
+# (packages: read); no Docker socket is mounted into it. Same trivy digest as
+# security-code.yml and the sec01 weekly scan.
+# =============================================================================
+
+name: security-image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: >-
+          The image to scan, e.g. ghcr.io/devtest-hq/app:develop-<sha> or
+          ghcr.io/devtest-hq/app@sha256:<digest>.
+        type: string
+        required: true
+      fail-on-findings:
+        description: Fail the job when the image has a finding at fail-severity or above.
+        type: boolean
+        default: false
+      fail-severity:
+        description: "CRITICAL | HIGH | MEDIUM"
+        type: string
+        default: HIGH
+
+permissions: {}
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  scan:
+    name: trivy image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Check out the report tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: devtest-hq/.github
+          ref: ${{ github.job_workflow_sha }}
+          path: .security-tooling
+          persist-credentials: false
+
+      - name: Scan
+        id: scan
+        env:
+          IMAGE: ${{ inputs.image }}
+          FAIL_SEVERITY: ${{ inputs.fail-severity }}
+          # trivy's own registry login variables; passed by name only, so the
+          # token never appears on a command line.
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out="${RUNNER_TEMP}/trivy-image.json"
+          docker run --rm --security-opt no-new-privileges \
+            -e TRIVY_USERNAME -e TRIVY_PASSWORD "${TRIVY_IMAGE}" \
+            image --quiet --image-src remote --scanners vuln \
+            --severity MEDIUM,HIGH,CRITICAL --ignore-unfixed \
+            --format json "${IMAGE}" > "${out}" || true
+          python3 .security-tooling/.github/scripts/security_report.py image \
+            --trivy "${out}" --image "${IMAGE}" --fail-severity "${FAIL_SEVERITY}"
+
+      - name: Fail on findings
+        if: inputs.fail-on-findings && steps.scan.outputs.new_blocking != '0' && steps.scan.outputs.new_blocking != ''
+        env:
+          COUNT: ${{ steps.scan.outputs.new_blocking }}
+          FAIL_SEVERITY: ${{ inputs.fail-severity }}
+        run: |
+          echo "::error::${COUNT} finding(s) at ${FAIL_SEVERITY} or above in the image"
+          exit 1

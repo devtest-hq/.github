@@ -1,0 +1,6 @@
+{
+  "name": "Security scans — semgrep, trivy",
+  "description": "Scan pull requests to develop/main with semgrep and trivy (only what the PR adds, as one comment), and the published images weekly.",
+  "iconName": "octicon shield-check",
+  "categories": ["Security", "Continuous integration"]
+}

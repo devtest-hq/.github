@@ -1,7 +1,9 @@
 # =============================================================================
-# move-zizmor-tag.yml — keep zizmor-v1 pointing at the tip of develop
+# move-zizmor-tag.yml — keep zizmor-v1 and security-v1 pointing at the tip
+# of develop
 #
-# Every repo in the org calls the zizmor workflow at @zizmor-v1, so merging a
+# Every repo in the org calls the zizmor workflow at @zizmor-v1 (and the
+# security workflows at @security-v1), so merging a
 # change here does nothing until the tag moves. That has already bitten once:
 # a fix was merged, reported green, and changed nothing anywhere, because the
 # tag still pointed at the previous commit. Nothing warns you — the callers
@@ -13,7 +15,7 @@
 # Pushing a tag does not fire a `push: branches:` event, so this cannot loop.
 # =============================================================================
 
-name: Move the zizmor-v1 tag
+name: Move the zizmor-v1 and security-v1 tags
 
 on:
   push:
@@ -27,7 +29,7 @@ concurrency:
 
 jobs:
   retag:
-    name: Move zizmor-v1 to the tip of develop
+    name: Move the tags to the tip of develop
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -35,21 +37,23 @@ jobs:
       # No checkout on purpose: moving a ref is one API call, and a checkout
       # able to push a tag would have to keep its credentials on disk, which
       # is an artipacked finding in the very repo that reports them.
-      - name: Point zizmor-v1 at this commit
+      - name: Point the tags at this commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if gh api "repos/${REPO}/git/ref/tags/zizmor-v1" >/dev/null 2>&1; then
-            gh api -X PATCH "repos/${REPO}/git/refs/tags/zizmor-v1" \
-              -f sha="${SHA}" -F force=true --jq '.object.sha'
-            echo "moved zizmor-v1 to ${SHA}"
-          else
-            # First run, or someone deleted the tag. Create rather than fail:
-            # a missing tag breaks every caller in the org.
-            gh api -X POST "repos/${REPO}/git/refs" \
-              -f ref="refs/tags/zizmor-v1" -f sha="${SHA}" --jq '.object.sha'
-            echo "created zizmor-v1 at ${SHA}"
-          fi
+          for tag in zizmor-v1 security-v1; do
+            if gh api "repos/${REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/${REPO}/git/refs/tags/${tag}" \
+                -f sha="${SHA}" -F force=true --jq '.object.sha'
+              echo "moved ${tag} to ${SHA}"
+            else
+              # First run, or someone deleted the tag. Create rather than fail:
+              # a missing tag breaks every caller in the org.
+              gh api -X POST "repos/${REPO}/git/refs" \
+                -f ref="refs/tags/${tag}" -f sha="${SHA}" --jq '.object.sha'
+              echo "created ${tag} at ${SHA}"
+            fi
+          done
