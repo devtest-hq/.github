@@ -1,0 +1,83 @@
+name: deps-check
+
+on:
+  workflow_call:
+    inputs:
+      fail-severity:
+        description: "CRITICAL | HIGH | MEDIUM"
+        type: string
+        default: HIGH
+
+permissions: {}
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  check:
+    name: dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the check tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: devtest-hq/.github
+          ref: ${{ github.job_workflow_sha }}
+          path: .deps-tooling
+          persist-credentials: false
+
+      - name: Detect the package manager
+        id: detect
+        run: python3 .deps-tooling/.github/scripts/deps_check.py detect
+
+      - name: Scan the lockfile for vulnerabilities
+        if: steps.detect.outputs.manager != ''
+        run: |
+          docker run --rm --security-opt no-new-privileges \
+            -v "${PWD}:/src:ro" "${TRIVY_IMAGE}" fs --quiet \
+            --scanners vuln --severity MEDIUM,HIGH,CRITICAL --ignore-unfixed \
+            --skip-dirs /src/.deps-tooling --format json /src \
+            > "${RUNNER_TEMP}/trivy.json" || true
+
+      - name: Set up Node.js
+        if: steps.detect.outputs.manager != '' && steps.detect.outputs.manager != 'bun'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Set up Bun
+        if: steps.detect.outputs.manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies from the lockfile
+        id: install
+        if: steps.detect.outputs.manager != ''
+        continue-on-error: true
+        env:
+          MANAGER: ${{ steps.detect.outputs.manager }}
+        run: |
+          case "${MANAGER}" in
+            npm) npm ci --ignore-scripts --no-audit --no-fund ;;
+            pnpm) corepack enable && pnpm install --frozen-lockfile --ignore-scripts ;;
+            yarn) corepack enable && yarn install --frozen-lockfile --ignore-scripts --non-interactive ;;
+            bun) bun install --frozen-lockfile --ignore-scripts ;;
+          esac
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          FAIL_SEVERITY: ${{ inputs.fail-severity }}
+        run: >-
+          python3 .deps-tooling/.github/scripts/deps_check.py report
+          --trivy "${RUNNER_TEMP}/trivy.json" --fail-severity "${FAIL_SEVERITY}"

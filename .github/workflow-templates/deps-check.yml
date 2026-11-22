@@ -1,0 +1,14 @@
+name: deps-check
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  deps-check:
+    permissions:
+      contents: read
+    uses: devtest-hq/.github/.github/workflows/deps-check.yml@deps-v1
