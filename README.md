@@ -245,7 +245,7 @@ updates:
       day: monday
     cooldown:
       default-days: 7
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
       minor-and-patch:
         update-types: [minor, patch]
