@@ -1,0 +1,6 @@
+{
+  "name": "deps-check — weekly dependency check",
+  "description": "Every Monday, list vulnerable and outdated packages (npm, pnpm, yarn or bun) and GitHub Actions pinned a major version behind.",
+  "iconName": "octicon package-dependencies",
+  "categories": ["Security", "Continuous integration"]
+}

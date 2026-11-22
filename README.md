@@ -177,3 +177,106 @@ code. Nothing warns you. If the tag ever needs moving by hand:
 ```bash
 git tag -f zizmor-v1 origin/develop && git push -f origin refs/tags/zizmor-v1
 ```
+
+The same workflow moves `security-v1` and `deps-v1`. It has no checkout on
+purpose: moving a ref is one API call, and a checkout able to push a tag would
+keep its credentials on disk (an artipacked finding in the repo that reports
+them). When a tag is missing (first run, or someone deleted it) it is created
+rather than failing, because a missing tag breaks every caller in the org.
+Pushing a tag does not fire a `push: branches:` event, so it cannot loop.
+
+## deps-check — weekly dependency check
+
+Every Monday at 06:00 UTC, each repo checks its own dependencies and writes
+the result to the run's job summary. The run **fails** when there is something
+to act on, so it shows up red in the Actions tab:
+
+- a package version with a known vulnerability at `fail-severity` or above
+  (default HIGH) that has a fixed version, found by trivy in the lockfile, with
+  the same trivy digest as `security-code.yml` and the sec01 weekly scan, so
+  the results match the SEOP issues;
+- a GitHub Action pinned a major version behind its latest release;
+- a lockfile problem: none committed, several of them, a `packageManager`
+  field that disagrees with the lockfile, or a frozen-lockfile install that
+  fails because the lockfile is out of sync with `package.json`.
+
+Outdated packages are listed too (installed, within range, latest, and whether
+the latest is a new major), but they never fail the run: **Dependabot** opens
+the update pull requests for them.
+
+The package manager comes from `packageManager` in `package.json`, otherwise
+from the lockfile: npm, pnpm, yarn (classic) and bun are supported. The
+install runs with `--ignore-scripts`, so no package code runs in the check.
+
+### Adding it to a repo
+
+**Two files**, both in the target repo.
+
+`.github/workflows/deps-check.yml`: copy
+`.github/workflow-templates/deps-check.yml`, or pick "deps-check — weekly
+dependency check" from the Actions → New workflow page:
+
+```yaml
+name: deps-check
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  deps-check:
+    permissions:
+      contents: read
+    uses: devtest-hq/.github/.github/workflows/deps-check.yml@deps-v1
+```
+
+`.github/dependabot.yml`: weekly update pull requests for the packages and for
+the Actions, minor and patch updates grouped into one pull request, majors one
+per package, and a 7-day cooldown so a version is a week old before it is
+proposed. Use `package-ecosystem: bun` instead of `npm` in a bun repo:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+```
+
+Run it once by hand after adding it: Actions → deps-check → Run workflow.
+
+### Inputs
+
+| Input | Default | What it does |
+|---|---|---|
+| `fail-severity` | `HIGH` | `CRITICAL`, `HIGH` or `MEDIUM`: the lowest vulnerability severity that fails the run. MEDIUM and up are always listed. |
+
+### Maintaining it
+
+The implementation is `.github/workflows/deps-check.yml` plus
+`.github/scripts/deps_check.py` (standard library only). Callers resolve the
+`deps-v1` tag, which `move-zizmor-tag.yml` keeps at the tip of `develop`.
+Try a change locally from a repo's root, after installing its dependencies:
+
+```bash
+python3 /path/to/.github/.github/scripts/deps_check.py detect
+python3 /path/to/.github/.github/scripts/deps_check.py report --trivy trivy.json
+```
